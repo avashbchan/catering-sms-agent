@@ -7,6 +7,10 @@ into os.environ elsewhere in the app.
 """
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def _require(name: str) -> str:
     value = os.environ.get(name)

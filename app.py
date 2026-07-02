@@ -16,6 +16,7 @@ import logging
 from flask import Flask, request, Response
 from twilio.request_validator import RequestValidator
 from twilio.twiml.messaging_response import MessagingResponse
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import config
 import storage
@@ -26,6 +27,12 @@ logging.basicConfig(level=getattr(logging, config.LOG_LEVEL.upper(), logging.INF
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# Trust the X-Forwarded-Proto/Host headers from ngrok (or any reverse proxy
+# in front of this app) so request.url reflects the public https:// URL
+# Twilio actually signed — otherwise it reconstructs as http://, and every
+# signature validation fails even though the number/tunnel are configured
+# correctly.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 HISTORY_LIMIT = 12
 FALLBACK_MESSAGE = (
@@ -41,10 +48,9 @@ def _validate_twilio_request() -> bool:
 
     signature = request.headers.get("X-Twilio-Signature", "")
     validator = RequestValidator(config.TWILIO_AUTH_TOKEN)
-    # request.url reflects the URL Flask thinks it received; if you're behind
-    # a proxy (ngrok, load balancer) that rewrites scheme/host, make sure
-    # ProxyFix or equivalent is configured so this matches the public URL
-    # Twilio actually signed.
+    # ProxyFix (see app setup above) makes request.url reflect the public
+    # https:// URL Twilio actually signed, even though ngrok/a load balancer
+    # forwards to this process over plain http internally.
     return validator.validate(request.url, request.form.to_dict(), signature)
 
 

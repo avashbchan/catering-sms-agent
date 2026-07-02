@@ -161,7 +161,7 @@ def _format_menu_for_prompt() -> str:
             allergen_str = ", ".join(item["allergens"]) if item["allergens"] else "none listed"
             dietary_str = ", ".join(item["dietary"]) if item["dietary"] else "none"
             lines.append(
-                f"  - {item['name']} — ${item['price_per_person']}/person. "
+                f"  - {item['name']} - ${item['price_per_person']}/person. "
                 f"{item['description']} "
                 f"[Allergens: {allergen_str}] [Dietary: {dietary_str}]"
             )
@@ -183,7 +183,7 @@ def _format_policy_for_prompt() -> str:
 def get_knowledge_base_text() -> str:
     """Render the full menu + policy as plain text for injection into the system prompt."""
     return (
-        f"=== {RESTAURANT_NAME} — CATERING MENU ===\n"
+        f"=== {RESTAURANT_NAME} - CATERING MENU ===\n"
         f"{_format_menu_for_prompt()}\n\n"
         f"=== CATERING POLICIES ===\n"
         f"{_format_policy_for_prompt()}\n\n"
