@@ -9,7 +9,8 @@ An after-hours catering coordinator for a single restaurant, reachable by SMS. C
 - **`storage.py`** — SQLite-backed conversation history, keyed by phone number, so it survives restarts and works across multiple worker processes. Also logs each extracted `OrderSummary` (see `order_extraction.py`) so a wrong-looking summary can be debugged later.
 - **`llm.py`** — Azure OpenAI client, system prompt construction, and the tool-calling loop (`submit_catering_lead`).
 - **`order_extraction.py`** — a second, dedicated Azure OpenAI call that runs right before the lead email is sent. It re-reads the *entire* transcript and produces a schema-guaranteed `OrderSummary` (via structured outputs / `.parse()`), independent of whatever the live `submit_catering_lead` tool call captured mid-conversation. This catches customer corrections (wrong date, changed order) that happened after the tool already fired. Falls back to plain JSON mode if the deployment doesn't support structured outputs, and to the original tool-call data if extraction fails entirely — a failed extraction never blocks the lead email.
-- **`email_sender.py`** — builds and sends the HTML staff notification email via SMTP or SendGrid, using the `OrderSummary` (itemized table + "needs staff follow-up" callout for open questions) when available.
+- **`email_sender.py`** — builds and sends the branded ("Caterable") HTML staff notification email via SMTP or SendGrid, using the `OrderSummary` (summary fields, itemized order table + total, "needs staff follow-up" callout for open questions) when available. The full conversation is no longer inlined in the email body — it's attached as a PDF instead (see `transcript_pdf.py`).
+- **`transcript_pdf.py`** — renders the full conversation as a PDF (customer/assistant visually distinguished), attached to the lead email.
 - **`config.py`** — all configuration from environment variables.
 
 ## Setup
