@@ -21,7 +21,9 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from config import config
 import storage
 import llm
+import order_extraction
 from email_sender import send_lead_email
+from knowledge_base import get_knowledge_base_text
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
@@ -85,7 +87,17 @@ def _handle_message(from_number: str, body: str) -> str:
 
     def on_lead_submitted(lead_args: dict) -> bool:
         transcript = storage.get_full_transcript(from_number)
-        return send_lead_email(lead_args, transcript)
+
+        # Re-derive a clean order summary from the full transcript rather
+        # than trusting only the live tool-call snapshot - catches customer
+        # corrections (wrong date, changed items) made after the tool fired.
+        order_summary = order_extraction.extract_order_summary(transcript, get_knowledge_base_text())
+        if order_summary is not None:
+            storage.add_order_summary(from_number, order_summary.model_dump_json())
+        else:
+            logger.warning("Order summary extraction failed for %s, falling back to tool-call data", from_number)
+
+        return send_lead_email(lead_args, transcript, order_summary)
 
     try:
         reply_text = llm.get_assistant_reply(history, from_number, on_lead_submitted)

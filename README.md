@@ -6,9 +6,10 @@ An after-hours catering coordinator for a single restaurant, reachable by SMS. C
 
 - **`app.py`** — Flask app. `/sms` is the Twilio webhook (validates the request signature, runs one conversation turn, replies with TwiML). `/health` is a plain health check.
 - **`knowledge_base.py`** — the menu, allergen/dietary tags, and catering policies. This is injected into the system prompt on every request (no RAG/vector DB — the menu is small and stable). **This is the file a non-developer edits to update the menu.**
-- **`storage.py`** — SQLite-backed conversation history, keyed by phone number, so it survives restarts and works across multiple worker processes.
+- **`storage.py`** — SQLite-backed conversation history, keyed by phone number, so it survives restarts and works across multiple worker processes. Also logs each extracted `OrderSummary` (see `order_extraction.py`) so a wrong-looking summary can be debugged later.
 - **`llm.py`** — Azure OpenAI client, system prompt construction, and the tool-calling loop (`submit_catering_lead`).
-- **`email_sender.py`** — builds and sends the HTML staff notification email via SMTP or SendGrid.
+- **`order_extraction.py`** — a second, dedicated Azure OpenAI call that runs right before the lead email is sent. It re-reads the *entire* transcript and produces a schema-guaranteed `OrderSummary` (via structured outputs / `.parse()`), independent of whatever the live `submit_catering_lead` tool call captured mid-conversation. This catches customer corrections (wrong date, changed order) that happened after the tool already fired. Falls back to plain JSON mode if the deployment doesn't support structured outputs, and to the original tool-call data if extraction fails entirely — a failed extraction never blocks the lead email.
+- **`email_sender.py`** — builds and sends the HTML staff notification email via SMTP or SendGrid, using the `OrderSummary` (itemized table + "needs staff follow-up" callout for open questions) when available.
 - **`config.py`** — all configuration from environment variables.
 
 ## Setup
@@ -47,7 +48,7 @@ Fill in `.env`. See the table below for what each variable is for.
 ### 3. Create the Azure OpenAI deployment
 
 1. In the [Azure Portal](https://portal.azure.com), create (or use an existing) Azure OpenAI resource.
-2. In Azure AI Foundry (or the Azure OpenAI Studio), deploy a chat model that supports tool calling (e.g. a GPT-4o-class model). Give the deployment a name — that name is what you put in `AZURE_OPENAI_DEPLOYMENT`.
+2. In Azure AI Foundry (or the Azure OpenAI Studio), deploy a chat model that supports both tool calling and structured outputs (e.g. a GPT-4o-class model). Give the deployment a name — that name is what you put in `AZURE_OPENAI_DEPLOYMENT`. If your deployment predates structured-outputs support, `order_extraction.py` automatically falls back to JSON mode, but that's a lower-reliability path (a model-recommended `.parse()`-capable deployment is preferred).
 3. Copy the resource's endpoint (e.g. `https://your-resource-name.openai.azure.com`) into `AZURE_OPENAI_ENDPOINT` — **no path or api-version suffix**, the app appends `/openai/v1` itself.
 4. Copy an API key from "Keys and Endpoint" into `AZURE_OPENAI_API_KEY`.
 

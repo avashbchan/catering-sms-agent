@@ -54,6 +54,19 @@ def init_db() -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_phone ON messages(phone_number, id)"
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS order_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone_number TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_summaries_phone ON order_summaries(phone_number, id)"
+        )
 
 
 def add_message(phone_number: str, role: str, content: str) -> None:
@@ -79,6 +92,15 @@ def get_recent_history(phone_number: str, limit: int = 12) -> list[dict]:
             (phone_number, limit),
         )
         return [{"role": row["role"], "content": row["content"]} for row in cur.fetchall()]
+
+
+def add_order_summary(phone_number: str, summary_json: str) -> None:
+    """Log the raw extracted OrderSummary for a lead, for later debugging if a summary looks wrong."""
+    with _write_lock, _cursor() as cur:
+        cur.execute(
+            "INSERT INTO order_summaries (phone_number, summary_json, created_at) VALUES (?, ?, ?)",
+            (phone_number, summary_json, datetime.now(timezone.utc).isoformat()),
+        )
 
 
 def get_full_transcript(phone_number: str) -> list[dict]:
