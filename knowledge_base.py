@@ -1,152 +1,229 @@
 """
-Restaurant knowledge base — MENU, ALLERGENS, AND CATERING POLICIES.
+Talk of the Town knowledge base - MULTI-MENU, SELECTIVE-INJECTION READY.
 
-*** THIS IS THE FILE A NON-DEVELOPER EDITS TO UPDATE THE MENU. ***
-No code changes are needed elsewhere: everything below is injected directly
-into the AI assistant's instructions on every message, so edits here take
-effect immediately the next time someone texts in.
+*** THIS (plus the markdown in kb_data/) IS WHAT A NON-DEVELOPER EDITS TO
+    UPDATE THE MENUS. ***
 
-How to edit:
-  - To add/remove/change a menu item, edit the MENU list below. Each item is
-    a Python dictionary — copy an existing one and change the values.
-  - `allergens` should list anything from ALLERGEN tags that the dish
-    CONTAINS. Leave it as an empty list [] only if the dish truly has none
-    of the tracked allergens.
-  - `dietary` should list which DIETARY tags the dish qualifies for.
-  - `price_per_person` is in whole US dollars.
-  - To change catering policies (minimums, lead time, delivery), edit the
-    CATERING_POLICY dictionary further down.
-  - Save the file — no restart needed if using a dev server with reload;
-    otherwise restart the app for changes to take effect.
+The business has several event-specific menus (barbecue, brunch, corporate,
+hors d'oeuvres, seated dinner, buffet, celebration of life). The always-true
+business info (policies, contact, dietary legend, custom/off-menu redirect)
+lives in kb_data/business.md; each menu's items live in kb_data/menus/<key>.md.
+To edit a menu, edit that markdown file. To add a menu, drop a new
+kb_data/menus/<key>.md and add an entry to MENUS below.
 
-This is placeholder/sample data — replace it with your restaurant's real
-menu and policies before going live.
+Two rendering modes:
+  - Multi-menu (production default): `get_knowledge_base_text()` returns the
+    business info + a menu index + the full detail of the requested menus.
+    `render_kb(active_menus)` lets you inject only the relevant menu(s) to cut
+    token cost (see "Selective injection" note at the bottom).
+  - Legacy simple-menu: if a flat `MENU` list is set (this is how the eval
+    fixtures inject small synthetic menus with allergen tags), the renderer
+    falls back to the old single-menu format. Production leaves MENU empty.
 """
+import contextvars
+import os
+from functools import lru_cache
 
-from config import config
+# Business identity. Edit here (or the business.md contact block) to rebrand.
+RESTAURANT_NAME = "Talk of the Town Catering & Special Events"
 
-RESTAURANT_NAME = config.RESTAURANT_NAME
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_KB_DATA = os.path.join(_THIS_DIR, "kb_data")
+_MENUS_DIR = os.path.join(_KB_DATA, "menus")
+_BUSINESS_PATH = os.path.join(_KB_DATA, "business.md")
 
-# Allergens we track. Keep tags short and consistent — they're shown to
-# customers verbatim.
-ALLERGEN_TAGS = ["nuts", "peanuts", "dairy", "gluten", "shellfish", "soy", "egg"]
 
-# Dietary categories we track.
-DIETARY_TAGS = ["vegetarian", "vegan", "gluten-free"]
+# ======================================================================
+# Multi-menu knowledge base
+# ======================================================================
 
-MENU = [
-    {
-        "name": "Herb Roasted Chicken Platter",
-        "category": "Entrees",
-        "description": "Bone-in chicken thighs roasted with rosemary and lemon, served with pan jus.",
-        "price_per_person": 14,
-        "allergens": [],
-        "dietary": ["gluten-free"],
+# The always-injected menu INDEX. key -> metadata. `key` must match
+# kb_data/menus/<key>.md. `event_types` help a router (or the model) match a
+# customer's event to a menu; `blurb` is the one-liner shown in the index so the
+# model knows a menu exists even when its detail isn't loaded.
+MENUS = {
+    "bbq": {
+        "name": "Barbecue",
+        "event_types": ["cookout", "picnic", "company picnic", "casual", "bbq", "backyard"],
+        "blurb": "Casual BBQ packages (pulled pork, smoked chicken, brisket, ribs), burgers and hot dogs, low country boil, sides.",
     },
-    {
-        "name": "Grilled Salmon with Chimichurri",
-        "category": "Entrees",
-        "description": "Wild-caught salmon filet, grilled and topped with a bright herb chimichurri.",
-        "price_per_person": 18,
-        "allergens": [],
-        "dietary": ["gluten-free"],
+    "brunch": {
+        "name": "Brunch",
+        "event_types": ["brunch", "morning", "shower", "baby shower", "bridal shower", "breakfast reception"],
+        "blurb": "Brunch entrees, frittatas and quiche, action and carving stations, finger sandwiches, breads.",
     },
-    {
-        "name": "Braised Short Rib",
-        "category": "Entrees",
-        "description": "Red-wine braised short rib, slow-cooked until fork tender.",
-        "price_per_person": 22,
-        "allergens": ["soy"],
-        "dietary": ["gluten-free"],
+    "corporate": {
+        "name": "Corporate",
+        "event_types": ["corporate", "office", "business", "meeting", "office lunch", "breakfast meeting", "conference"],
+        "blurb": "Business breakfasts, boxed sandwiches and wraps, executive hot and cold luncheons, sides.",
     },
-    {
-        "name": "Roasted Vegetable & Chickpea Bowl",
-        "category": "Entrees",
-        "description": "Seasonal roasted vegetables, chickpeas, and tahini dressing over grains.",
-        "price_per_person": 13,
-        "allergens": ["soy"],
-        "dietary": ["vegetarian", "vegan", "gluten-free"],
+    "hors_doeuvres": {
+        "name": "Hors d'oeuvres & Enhancements",
+        "event_types": ["cocktail", "reception", "cocktail hour", "appetizers", "enhancements", "happy hour", "mixer"],
+        "blurb": "Passed and displayed appetizers, dips and displays, action and carving stations, dessert stations.",
     },
-    {
-        "name": "Baked Ziti",
-        "category": "Entrees",
-        "description": "House marinara, mozzarella, and ricotta baked with ziti pasta.",
-        "price_per_person": 12,
-        "allergens": ["dairy", "gluten"],
-        "dietary": ["vegetarian"],
+    "seated_dinner": {
+        "name": "Seated Served Dinner",
+        "event_types": ["wedding", "gala", "formal dinner", "plated dinner", "rehearsal dinner", "anniversary"],
+        "blurb": "Formal plated dinners: plated appetizers, soups, salads, chicken/beef/seafood/pork/lamb/vegetarian entrees.",
     },
-    {
-        "name": "Caesar Salad",
-        "category": "Sides & Salads",
-        "description": "Romaine, parmesan, garlic croutons, house Caesar dressing.",
-        "price_per_person": 6,
-        "allergens": ["dairy", "gluten", "egg"],
-        "dietary": ["vegetarian"],
+    "buffet": {
+        "name": "Buffet",
+        "event_types": ["wedding", "reception", "buffet", "large gathering", "party", "graduation", "celebration"],
+        "blurb": "Buffet salads, entrees, vegetables, starches, and pasta sides for larger self-serve events.",
     },
-    {
-        "name": "Garden Salad",
-        "category": "Sides & Salads",
-        "description": "Mixed greens, tomato, cucumber, red onion, balsamic vinaigrette.",
-        "price_per_person": 5,
-        "allergens": [],
-        "dietary": ["vegetarian", "vegan", "gluten-free"],
+    "celebration_of_life": {
+        "name": "Celebration of Life",
+        "event_types": ["memorial", "funeral", "celebration of life", "repast", "wake"],
+        "blurb": "Fully customized memorial catering and staffing; built directly with our events team.",
     },
-    {
-        "name": "Garlic Mashed Potatoes",
-        "category": "Sides & Salads",
-        "description": "Yukon gold potatoes, roasted garlic, butter, cream.",
-        "price_per_person": 5,
-        "allergens": ["dairy"],
-        "dietary": ["vegetarian", "gluten-free"],
-    },
-    {
-        "name": "Thai Peanut Noodle Salad",
-        "category": "Sides & Salads",
-        "description": "Chilled noodles tossed in a peanut-lime dressing with scallion and cilantro.",
-        "price_per_person": 7,
-        "allergens": ["peanuts", "soy", "gluten"],
-        "dietary": ["vegetarian", "vegan"],
-    },
-    {
-        "name": "Assorted Dinner Rolls",
-        "category": "Sides & Salads",
-        "description": "Warm rolls with butter.",
-        "price_per_person": 3,
-        "allergens": ["dairy", "gluten"],
-        "dietary": ["vegetarian"],
-    },
-    {
-        "name": "Chocolate Chunk Cookies",
-        "category": "Desserts",
-        "description": "House-baked cookies with dark chocolate chunks. Baked in a kitchen that also processes tree nuts.",
-        "price_per_person": 4,
-        "allergens": ["dairy", "gluten", "egg", "nuts"],
-        "dietary": ["vegetarian"],
-    },
-    {
-        "name": "Seasonal Fruit Tart",
-        "category": "Desserts",
-        "description": "Buttery tart shell, pastry cream, seasonal fresh fruit.",
-        "price_per_person": 6,
-        "allergens": ["dairy", "gluten", "egg"],
-        "dietary": ["vegetarian"],
-    },
-]
-
-CATERING_POLICY = {
-    "order_minimum_guests": 10,
-    "order_minimum_dollars": 150,
-    "lead_time_hours": 48,
-    "delivery_radius_miles": 15,
-    "delivery_fee": "Delivery fee is calculated by distance and quoted by staff when the order is confirmed.",
-    "service_area_note": "We currently deliver within 15 miles of the restaurant. Orders outside that radius may still be available for pickup.",
-    "deposit_note": "A deposit may be required for large events; staff will confirm during follow-up.",
-    "kitchen_note": (
-        "Our kitchen is NOT a dedicated allergen-free facility (this includes nuts, "
-        "gluten, and dairy). Cross-contact is possible even when a dish's listed "
-        "allergens don't include a particular allergen."
-    ),
 }
+
+
+def menu_keys():
+    return list(MENUS)
+
+
+@lru_cache(maxsize=None)
+def _read(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _normalize_active(active_menus) -> list:
+    """Coerce a caller-provided active set into validated, de-duplicated known
+    menu keys (order preserved)."""
+    if not active_menus:
+        return []
+    if isinstance(active_menus, str):
+        active_menus = [active_menus]
+    seen = []
+    for key in active_menus:
+        k = str(key).strip()
+        if k in MENUS and k not in seen:
+            seen.append(k)
+    return seen
+
+
+def _menu_index(active: list) -> str:
+    lines = [
+        "=== AVAILABLE MENUS (event-specific) ===",
+        "This business has several event-specific menus. Only the menu(s) marked "
+        "[loaded] below have their full item list available right now. For any "
+        "other menu, tell the customer you can pull it up - do NOT guess its "
+        "items.",
+    ]
+    for key, meta in MENUS.items():
+        state = "loaded" if key in active else "not loaded"
+        events = ", ".join(meta["event_types"][:4])
+        lines.append(f"- {meta['name']} [{state}] - {meta['blurb']} (good for: {events})")
+    return "\n".join(lines)
+
+
+def render_kb(active_menus=None) -> str:
+    """Render the injected KB text for a given active menu set.
+
+    active_menus: a menu key, a list of keys, or None. Unknown keys are ignored.
+    With no active menus, only business info + the menu index are injected
+    (routing mode) - useful once a menu router is wired up. `get_knowledge_base_text`
+    below defaults to loading ALL menus so the agent works without a router.
+    """
+    active = _normalize_active(active_menus)
+    parts = [_read(_BUSINESS_PATH), "", _menu_index(active)]
+    if active:
+        parts.append("")
+        parts.append("=== LOADED MENU DETAIL ===")
+        for key in active:
+            parts.append("")
+            parts.append(f"## {MENUS[key]['name'].upper()} MENU")
+            parts.append(_read(os.path.join(_MENUS_DIR, f"{key}.md")))
+    else:
+        parts.append("")
+        parts.append(
+            "No specific menu is loaded yet. Ask what kind of event the customer "
+            "is planning, match it to one of the menus above, and load that menu."
+        )
+    return "\n".join(parts)
+
+
+# ======================================================================
+# Selective injection: pick which menu(s) to inject from the conversation
+#
+# This is the production port of what the eval suite did with an explicit
+# `active_menus` per test: choose the relevant menu(s) from the customer's
+# event so only those are injected, instead of paying for all 7 every message.
+# ======================================================================
+
+# The active menu set for the current conversation turn. A ContextVar (not a
+# plain global) so concurrent requests/threads don't clobber each other.
+# Value None => inject ALL menus (the safe default, e.g. for order extraction);
+# a list => inject exactly those; [] => index only (routing mode).
+_active_menus_var = contextvars.ContextVar("active_menus", default=None)
+
+
+def set_active_menus(keys):
+    """Set the active menu set for the current context. Returns a token to pass
+    to reset_active_menus() in a finally block."""
+    return _active_menus_var.set(keys)
+
+
+def reset_active_menus(token):
+    _active_menus_var.reset(token)
+
+
+# Trigger substrings per menu: the manifest event_types plus a few obvious menu
+# names/synonyms. Matched case-insensitively against the conversation text.
+def _triggers(key, meta):
+    extra = {
+        "bbq": ["barbecue", "bbq", "smoked", "ribs", "pulled pork"],
+        "brunch": ["brunch", "breakfast"],
+        "corporate": ["corporate", "office", "work lunch", "company lunch"],
+        "hors_doeuvres": ["hors", "appetizer", "hors d'oeuvres", "passed", "canape", "small bites"],
+        "seated_dinner": ["seated", "plated", "sit down", "sit-down", "formal dinner"],
+        "buffet": ["buffet"],
+        "celebration_of_life": ["celebration of life", "memorial", "funeral", "repast", "wake"],
+    }.get(key, [])
+    return [t.lower() for t in (list(meta["event_types"]) + [meta["name"].lower()] + extra)]
+
+
+def select_menus_for_conversation(messages, max_menus=3):
+    """Return the menu keys relevant to a conversation, newest mention first.
+
+    `messages` is the {"role","content"} history (any subset). Scans newest to
+    oldest so a customer who switches events (corporate -> wedding) gets the new
+    menu(s) first. Returns [] when nothing matches, so the agent stays in
+    routing mode (business + index only) and asks what kind of event it is.
+    Capped at `max_menus` to bound token cost.
+    """
+    selected = []
+    for msg in reversed(list(messages or [])):
+        text = str((msg or {}).get("content", "")).lower()
+        if not text:
+            continue
+        for key, meta in MENUS.items():
+            if key in selected:
+                continue
+            if any(trigger in text for trigger in _triggers(key, meta)):
+                selected.append(key)
+                if len(selected) >= max_menus:
+                    return selected
+    return selected
+
+
+# ======================================================================
+# Legacy simple-menu interface (kept for backward compatibility)
+#
+# Production leaves MENU empty, so get_knowledge_base_text() uses the multi-menu
+# renderer above. The eval suite's synthetic fixtures (small allergen-tagged
+# test menus) patch MENU/CATERING_POLICY/... at runtime; when MENU is non-empty
+# the renderer falls back to this single-menu format, and estimate_order_value /
+# find_menu_item operate on it.
+# ======================================================================
+
+ALLERGEN_TAGS = ["nuts", "peanuts", "dairy", "gluten", "shellfish", "soy", "egg"]
+DIETARY_TAGS = ["vegetarian", "vegan", "gluten-free"]
+MENU = []          # empty in production -> multi-menu mode
+CATERING_POLICY = {}   # populated only in legacy/eval mode
 
 
 def _format_menu_for_prompt() -> str:
@@ -154,7 +231,6 @@ def _format_menu_for_prompt() -> str:
     by_category = {}
     for item in MENU:
         by_category.setdefault(item["category"], []).append(item)
-
     for category, items in by_category.items():
         lines.append(f"\n{category}:")
         for item in items:
@@ -180,8 +256,7 @@ def _format_policy_for_prompt() -> str:
     )
 
 
-def get_knowledge_base_text() -> str:
-    """Render the full menu + policy as plain text for injection into the system prompt."""
+def _render_legacy() -> str:
     return (
         f"=== {RESTAURANT_NAME} - CATERING MENU ===\n"
         f"{_format_menu_for_prompt()}\n\n"
@@ -192,8 +267,25 @@ def get_knowledge_base_text() -> str:
     )
 
 
+def get_knowledge_base_text() -> str:
+    """Render the KB as plain text for injection into the system prompt.
+
+    - Legacy simple-menu mode (a flat MENU is set): the old single-menu format.
+    - Multi-menu mode (production default, MENU empty): business info + index +
+      the menu detail for the ACTIVE set (see set_active_menus /
+      select_menus_for_conversation). When no active set is in context (e.g. a
+      direct call for order extraction), all menus are injected so nothing is
+      missing.
+    """
+    if MENU:
+        return _render_legacy()
+    active = _active_menus_var.get()
+    keys = menu_keys() if active is None else active
+    return render_kb(keys)
+
+
 def find_menu_item(name: str):
-    """Case-insensitive lookup of a menu item by (partial) name, used for price estimation."""
+    """Case-insensitive lookup of a menu item by (partial) name (legacy MENU)."""
     name_lower = name.lower().strip()
     for item in MENU:
         if item["name"].lower() == name_lower:
@@ -206,17 +298,17 @@ def find_menu_item(name: str):
 
 def estimate_order_value(selected_items, guest_count):
     """
-    Best-effort estimate of order value from KB prices.
-    `selected_items` is a list of item name strings (as captured by the LLM).
+    Best-effort estimate of order value from KB prices (legacy MENU).
     Returns (estimated_total, matched_items, unmatched_items).
+
+    Talk of the Town's menus do not publish prices, so in production this
+    returns 0 with everything unmatched - staff quote pricing. It stays
+    functional for the priced eval fixtures and any future priced menu.
     """
     if not guest_count or guest_count <= 0:
         guest_count = 1
-
-    matched_items = []
-    unmatched_items = []
+    matched_items, unmatched_items = [], []
     per_person_total = 0.0
-
     for raw_name in selected_items or []:
         item = find_menu_item(raw_name)
         if item:
@@ -224,6 +316,21 @@ def estimate_order_value(selected_items, guest_count):
             per_person_total += item["price_per_person"]
         else:
             unmatched_items.append(raw_name)
-
     estimated_total = round(per_person_total * guest_count, 2)
     return estimated_total, matched_items, unmatched_items
+
+
+# ----------------------------------------------------------------------
+# Selective injection (token savings) - how to enable it later
+#
+# Today get_knowledge_base_text() injects ALL menus every message (~13k tokens
+# for this business) so the agent works with no extra wiring. Most of that is
+# unnecessary once you know the event type. To inject only the relevant menu(s):
+#   1. Pick the active set (e.g. from the event type via MENUS[*]['event_types'],
+#      or let the model request a menu through a `load_menu` tool).
+#   2. Build the system prompt from render_kb(active_menus) instead of
+#      get_knowledge_base_text().
+# Injecting business + index + one menu is ~3k tokens vs ~13k for all menus
+# (about a 77% cut). The v2+/v3/v4 prompt variants are already written to route
+# by event type and to offer to "pull up" a menu that isn't loaded.
+# ----------------------------------------------------------------------

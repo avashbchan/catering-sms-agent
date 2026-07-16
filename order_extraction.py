@@ -90,7 +90,7 @@ def extract_order_summary(transcript: list[dict], knowledge_base_text: str) -> O
     ]
 
     try:
-        completion = client.chat.completions.parse(
+        completion = client.beta.chat.completions.parse(
             model=config.AZURE_OPENAI_DEPLOYMENT,
             messages=messages,
             response_format=OrderSummary,

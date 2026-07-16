@@ -78,6 +78,54 @@ Open `knowledge_base.py`. Each menu item is a dictionary in the `MENU` list — 
 
 **The seeded menu and policies are placeholder data — replace them with your restaurant's real menu before going live.**
 
+## Testing the prompt (promptfoo evals)
+
+The `evals/` directory holds a [promptfoo](https://promptfoo.dev) suite that scores the prompts on four core metrics — **accuracy, groundedness, context relevance, conciseness** — plus catering-specific criteria (allergy safety, policy adherence, lead-capture completeness, order-extraction accuracy) across a matrix of menu fixtures (tiny, large, allergy-heavy, mid-service menu swap). It lets you change a prompt and get a per-metric pass/fail read in one command, so prompt iteration is data-driven rather than by feel.
+
+How it works, briefly:
+- **No Twilio, no production changes.** A custom Python provider (`evals/provider.py`) calls the app's real `llm.get_assistant_reply` directly, monkeypatching in the chosen menu fixture and prompt variant for the duration of each call and restoring them after — so evals and production can't drift, and `llm.py` / `knowledge_base.py` / `order_extraction.py` are never edited.
+- **Prompt variants** live in `evals/prompt_variants/` (`v1_current.py` is a verbatim copy of the live prompt — the baseline). promptfoo runs the whole suite against every variant listed and renders a comparison matrix.
+- **The judge is a separate deployment** (`AZURE_OPENAI_JUDGE_DEPLOYMENT`) so the model under test never grades itself.
+
+### Setup
+
+```bash
+cd evals
+npm install
+```
+
+Requires Node 18+ and Python (the provider imports the app's own modules, so run from a shell where the app's deps are installed — the same `.venv` is fine). Set `AZURE_OPENAI_JUDGE_DEPLOYMENT` in the project `.env` (see `.env.example`); the suite reuses `AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_ENDPOINT` for both the agent and the judge.
+
+### Running
+
+```bash
+npm run eval:fast   # core metrics, default menu — run after every prompt tweak
+npm run eval:full   # all metrics + all fixtures — run before committing a change
+npm run view        # open the results UI (per-metric pass rates, variant matrix)
+```
+
+Both eval commands pre-render each fixture's knowledge base to `evals/fixtures/rendered/` (used as the grounding context for the groundedness/relevance graders) and then hit real Azure OpenAI.
+
+### Iterating on the prompt
+
+1. Copy `evals/prompt_variants/v1_current.py` to `vN_yourchange.py`, edit its `build_system_prompt()`, and add a matching `vN_yourchange.txt` (containing just the id `vN_yourchange`).
+2. Add that `.txt` to the `prompts:` list in `promptfooconfig.fast.yaml` / `.full.yaml`.
+3. `npm run eval:fast` and compare the new column against `v1_current` — each metric aggregates its own pass rate, so you can see e.g. groundedness improve without conciseness regressing.
+
+To add a test case, drop it into the relevant `evals/tests/*.yaml` (each assertion carries a `metric:` tag that rolls up in the report). To add a menu scenario, add a fixture module under `evals/fixtures/` and register it in `evals/fixtures/__init__.py`.
+
+### Multi-menu fixture and selective injection
+
+`evals/fixtures/talkofthetown/` is a real, large, multi-menu fixture (Talk of the Town Catering) used to test the case where a business has **several event-specific menus** and you only want to inject the relevant one(s) to keep token cost down:
+
+- **`business.md`** is always injected — awards, policies, dietary-tag legend, and the phone/contact-page a customer is routed to for **custom or off-menu requests**. This is the cost you always pay.
+- **`menus/<key>.md`** (barbecue, brunch, corporate, hors d'oeuvres, seated dinner, buffet, celebration of life) hold each menu's items and are injected **only when active**. A cheap menu index (names + event types, from `manifest.py`) is always injected so the model knows what exists without loading it.
+- The loader `render_kb(active_menus)` produces business info + index + full detail for just the active menu(s). In evals, a test sets the `active_menus` var (e.g. `active_menus: buffet`); in production, a small router keyed off the event type picks the set and can switch it as the conversation changes.
+
+The source PDFs are converted with Microsoft's **markitdown** via `evals/fixtures/talkofthetown/convert_pdfs.py` (`pip install "markitdown[pdf]"`, then `python convert_pdfs.py [SOURCE_DIR]`) into `_raw/`; the curated `menus/*.md` are derived from that raw output with the print headers/footers stripped.
+
+The **`v2_multimenu`** prompt variant is the one aware of this setup — it routes by event type, quotes only from loaded menus, offers to pull up a menu that isn't loaded (instead of inventing it), and redirects custom/off-menu/pricing asks to the business contact. `tests/multimenu_injection.yaml` and `tests/contact_redirect.yaml` cover those behaviors; the full config compares `v2_multimenu` against the `v1_current` baseline.
+
 ## Security
 
 - Never commit `.env` — it holds live secrets (Azure key, Twilio auth token/API secret, SMTP/SendGrid credentials). `.gitignore` already excludes it.

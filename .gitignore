@@ -1,7 +1,9 @@
 # Secrets
 .env
 *.env
-!.env.example
+
+# Testing
+evals/
 
 # Database
 *.db
