@@ -7,6 +7,7 @@ NOT the older `AzureOpenAI` client, and no hardcoded api_version.
 """
 import json
 import logging
+from dataclasses import dataclass
 
 from openai import OpenAI
 
@@ -17,6 +18,22 @@ from knowledge_base import get_knowledge_base_text, RESTAURANT_NAME
 logger = logging.getLogger(__name__)
 
 _client = None
+
+
+@dataclass
+class LeadResult:
+    """Outcome of an attempted lead submission, returned by the
+    `on_lead_submitted` callback.
+
+    `submitted` is whether the lead was actually written/emailed. `tool_result`
+    is the message fed back to the model as the tool result - it shapes the
+    model's next reply, so for a BLOCKED lead (guard failed) it tells the model
+    to keep the conversation going (ask for the missing detail, or confirm and
+    ask if more help is needed) rather than claim success.
+    """
+
+    submitted: bool
+    tool_result: str
 
 
 def get_client() -> OpenAI:
@@ -73,11 +90,13 @@ The knowledge base may include a menu INDEX listing several event-specific menus
 CONTACT / CUSTOM REQUESTS:
 The published menus don't cover everything the business can do. When the customer asks for a custom dish, an off-menu item, a dietary accommodation not shown, bar/rental/staffing specifics, a fully bespoke event (like a celebration of life), or pricing the menus don't list, warmly guide them to reach the business directly - and INCLUDE the actual contact channel from the knowledge base (the phone number or contact page), not a vague "reach out to us". Frame it as the fastest way to make exactly what they want happen. Still capture their event details as a lead when you can.
 
-LEAD CAPTURE:
-Once you have gathered enough of the following to be useful to staff, call the `submit_catering_lead` tool: customer name, event date & time, guest count, delivery address (or pickup), selected/desired items, dietary or allergy notes, and budget (if the customer offers one - don't force it).
-You don't need every single field filled before calling the tool - use judgment. It's better to capture a lead with most fields and a note about what's missing than to interrogate the customer indefinitely. If the customer seems ready to move forward, call the tool.
-After the tool runs, confirm warmly to the customer that staff will follow up during business hours to finalize details - don't ask further questions in that same reply.
-Only call the tool once per conversation unless the customer explicitly wants to substantially change their order after already submitting."""
+LEAD CAPTURE - follow this flow in order:
+The FIVE required details before a lead can be submitted are: customer name, event date and time, guest count, delivery address (or pickup), and the menu items they want. Dietary/allergy notes and budget are helpful but optional - don't force them.
+1. GATHER: collect the five required details naturally over the conversation (one question per message, your choice of order and phrasing). If any are still missing, ask for them.
+2. CONFIRM: once you have all five, send ONE message that restates them back to the customer - name, event date/time, guest count, delivery or pickup, and items - and ask if there is anything else they need help with. Do NOT call submit_catering_lead in this confirmation message.
+3. SUBMIT: only AFTER the customer replies that they are all set / have no more questions, call the `submit_catering_lead` tool. Then warmly confirm staff will follow up during business hours - and don't ask further questions in that reply.
+4. RE-CONFIRM ON CHANGES: if the customer changes any already-confirmed detail (e.g. "actually make it 50 guests"), the prior confirmation no longer counts - update the detail, restate the revised details, and ask again if they need anything else before you submit.
+Call the tool only once per completed confirmation. Note: a staff-side safety check also verifies the five details are complete and that the customer confirmed they are done before the lead actually sends, so do not submit early."""
 
 
 SUBMIT_CATERING_LEAD_TOOL = {
@@ -139,10 +158,13 @@ def get_assistant_reply(history: list[dict], phone_number: str, on_lead_submitte
     `history` is a list of {"role": "user"|"assistant", "content": str},
     already trimmed to the recent window, ending with the newest user message.
 
-    `on_lead_submitted(lead_args: dict) -> bool` is called if the model
-    invokes submit_catering_lead; it should perform the actual side effect
-    (sending the staff email) and return whether it succeeded. The result is
-    fed back to the model so its final reply can reflect success/failure.
+    `on_lead_submitted(lead_args: dict) -> LeadResult` is called if the model
+    invokes submit_catering_lead. It runs the submission guard and, only if it
+    passes, performs the side effects (DB write + staff email). Its
+    `tool_result` is fed back to the model as the tool result so the model's
+    final reply reflects what actually happened - a confirmation when the lead
+    sent, or a natural continuation (ask for the missing detail / re-confirm)
+    when the guard blocked it.
 
     Returns the final assistant text reply to send back over SMS.
     """
@@ -183,13 +205,11 @@ def get_assistant_reply(history: list[dict], phone_number: str, on_lead_submitte
                     lead_args = {}
                 lead_args.setdefault("phone", phone_number)
 
-                success = on_lead_submitted(lead_args)
-                tool_result = (
-                    "Lead successfully sent to staff."
-                    if success
-                    else "Lead could not be sent to staff due to a technical issue — "
-                    "let the customer know staff will still be notified and to expect a follow-up call."
-                )
+                # on_lead_submitted runs the submission guard and returns a
+                # LeadResult; its tool_result already phrases the outcome for the
+                # model (success confirmation, or continue-the-conversation
+                # guidance when the guard blocked the lead).
+                tool_result = on_lead_submitted(lead_args).tool_result
             else:
                 tool_result = f"Unknown tool: {tool_call.function.name}"
 
@@ -201,13 +221,16 @@ def get_assistant_reply(history: list[dict], phone_number: str, on_lead_submitte
                 }
             )
 
+        # No tools on the follow-up: we want the model's natural-language reply
+        # now, not a second tool call in the same turn (which wouldn't be
+        # processed, and for a blocked lead could otherwise yield an empty reply
+        # that we'd wrongly paper over as a success).
         follow_up = client.chat.completions.create(
             model=config.AZURE_OPENAI_DEPLOYMENT,
             messages=messages,
-            tools=[SUBMIT_CATERING_LEAD_TOOL],
         )
         return follow_up.choices[0].message.content or (
-            "Thanks! Our staff will follow up with you during business hours."
+            "Thanks - could you confirm those details so I can pass this along?"
         )
 
     return choice.message.content or "Sorry, could you rephrase that?"

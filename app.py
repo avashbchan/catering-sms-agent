@@ -5,7 +5,8 @@ Flow per inbound text:
   1. Validate the Twilio request signature (reject anything else).
   2. Load recent conversation history for this phone number from SQLite.
   3. Append the new user message, call the LLM.
-  4. If the LLM calls submit_catering_lead, email staff a summary.
+  4. If the LLM calls submit_catering_lead, run the submission guard
+     (lead_gate) and only if it passes, log the order summary and email staff.
   5. Save the assistant's reply and respond with TwiML.
 
 Any failure in steps 2-4 is caught so the customer still gets a polite
@@ -21,6 +22,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from config import config
 import storage
 import llm
+import lead_gate
 import order_extraction
 from email_sender import send_lead_email
 from knowledge_base import get_knowledge_base_text
@@ -85,19 +87,40 @@ def _handle_message(from_number: str, body: str) -> str:
     storage.add_message(from_number, "user", body)
     history = storage.get_recent_history(from_number, limit=HISTORY_LIMIT)
 
-    def on_lead_submitted(lead_args: dict) -> bool:
-        transcript = storage.get_full_transcript(from_number)
+    def on_lead_submitted(lead_args: dict) -> llm.LeadResult:
+        # Transcript scoped to the CURRENT lead (messages since this number's
+        # last submitted lead) so a repeat customer's older conversation doesn't
+        # bleed into this lead's summary/email. Fetched before add_order_summary
+        # below, so this lead's own summary can't become its own boundary.
+        transcript = storage.get_transcript_since_last_lead(from_number)
 
-        # Re-derive a clean order summary from the full transcript rather
-        # than trusting only the live tool-call snapshot - catches customer
+        # Re-derive a clean order summary from the scoped transcript rather than
+        # trusting only the live tool-call snapshot - catches customer
         # corrections (wrong date, changed items) made after the tool fired.
         order_summary = order_extraction.extract_order_summary(transcript, get_knowledge_base_text())
-        if order_summary is not None:
-            storage.add_order_summary(from_number, order_summary.model_dump_json())
-        else:
-            logger.warning("Order summary extraction failed for %s, falling back to tool-call data", from_number)
 
-        return send_lead_email(lead_args, transcript, order_summary)
+        # --- Submission guard (code-level safety net) ---
+        # Both checks must pass before ANY DB write or email goes out.
+        missing = lead_gate.missing_required_fields(order_summary)
+        if missing:
+            logger.info("Lead blocked for %s: missing required field(s) %s", from_number, missing)
+            return llm.LeadResult(False, lead_gate.missing_fields_guidance(missing))
+
+        # `history` (captured from the enclosing scope) ends with the customer's
+        # latest message - the one the readiness check judges.
+        if not lead_gate.customer_ready_to_submit(history):
+            logger.info("Lead blocked for %s: customer has not confirmed they are done", from_number)
+            return llm.LeadResult(False, lead_gate.NEEDS_CONFIRMATION_GUIDANCE)
+
+        # Guard passed: persist the boundary (order_summaries row) + email staff.
+        storage.add_order_summary(from_number, order_summary.model_dump_json())
+        if send_lead_email(lead_args, transcript, order_summary):
+            return llm.LeadResult(True, "Lead successfully sent to staff.")
+        return llm.LeadResult(
+            False,
+            "Lead could not be sent to staff due to a technical issue - let the customer "
+            "know staff will still be notified and to expect a follow-up call.",
+        )
 
     try:
         reply_text = llm.get_assistant_reply(history, from_number, on_lead_submitted)

@@ -5,11 +5,14 @@ Nothing in this file is a secret — actual values come from the environment
 (see .env.example). Import `config` and read attributes off it; don't reach
 into os.environ elsewhere in the app.
 """
+import logging
 import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 def _require(name: str) -> str:
@@ -69,6 +72,14 @@ class Config:
                 "Configure either SENDGRID_API_KEY or SMTP_HOST/SMTP_PORT/SMTP_USER/"
                 "SMTP_PASSWORD/SMTP_FROM for staff email delivery."
             )
+
+        # Soft check: warn (never fail) if the typed contact mirror in
+        # business_info.py has drifted from kb_data/business.md. Imported here
+        # rather than at module top to keep config free of app-module imports.
+        from business_info import verify_against_business_md
+
+        for warning in verify_against_business_md():
+            logger.warning("Business info drift: %s", warning)
 
 
 config = Config()

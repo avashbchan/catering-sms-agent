@@ -19,6 +19,12 @@ Best of Weddings Hall of Fame, and Wedding Wire's Couples' Choice Award.
 
 ## Contact
 
+<!-- MIRRORED IN CODE: business_info.py holds a typed copy of the name, phone,
+     website, and address below so the app can import them without parsing this
+     file. If you change any of these, also update business_info.py (a startup
+     check logs a warning if they drift). The rest of this file is read only by
+     the knowledge-base pipeline and has no Python mirror. -->
+
 - Phone: 770.594.1567
 - Website / contact page: talkofthetownatlanta.com
 - Location: 2469 Canton Rd, Marietta, GA, 30066
