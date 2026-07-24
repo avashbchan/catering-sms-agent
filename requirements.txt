@@ -5,3 +5,4 @@ twilio>=9.0
 python-dotenv>=1.0
 sendgrid>=6.11
 gunicorn>=22.0
+fpdf2>=2.7  # local (pure-Python) PDF generation for the lead-email transcript attachment

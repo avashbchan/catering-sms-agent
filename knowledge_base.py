@@ -24,8 +24,12 @@ import contextvars
 import os
 from functools import lru_cache
 
-# Business identity. Edit here (or the business.md contact block) to rebrand.
-RESTAURANT_NAME = "Talk of the Town Catering & Special Events"
+from business_info import BUSINESS
+
+# Business identity. Sourced from business_info.py (the typed mirror of the
+# business.md contact block) so the name lives in exactly one place in code.
+# To rebrand, edit business_info.py (and the business.md contact block).
+RESTAURANT_NAME = BUSINESS.name
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _KB_DATA = os.path.join(_THIS_DIR, "kb_data")

@@ -78,7 +78,13 @@ def add_message(phone_number: str, role: str, content: str) -> None:
 
 
 def get_recent_history(phone_number: str, limit: int = 12) -> list[dict]:
-    """Return the last `limit` messages for this phone number, oldest first."""
+    """Return the last `limit` messages for this phone number, oldest first.
+
+    This is the LLM's per-turn conversational context and is intentionally
+    lead-boundary-agnostic - it just trims to the most recent messages. The
+    lead email / order extraction use get_transcript_since_last_lead instead,
+    which scopes to the current lead (see below).
+    """
     with _cursor() as cur:
         cur.execute(
             """
@@ -104,14 +110,60 @@ def add_order_summary(phone_number: str, summary_json: str) -> None:
 
 
 def get_full_transcript(phone_number: str) -> list[dict]:
-    """Return the complete conversation history for this phone number, oldest first.
+    """Return the complete conversation history for this phone number, oldest
+    first, each item as {"role", "content", "created_at"}.
 
-    Used for the transcript appended to the staff lead email — unlike
-    get_recent_history, this is not trimmed.
+    This is the unscoped "entire history" query. The staff lead email / order
+    extraction use get_transcript_since_last_lead instead (scoped to the current
+    lead); this remains available if anything ever needs the full history.
     """
     with _cursor() as cur:
         cur.execute(
-            "SELECT role, content FROM messages WHERE phone_number = ? ORDER BY id ASC",
+            "SELECT role, content, created_at FROM messages WHERE phone_number = ? ORDER BY id ASC",
             (phone_number,),
         )
-        return [{"role": row["role"], "content": row["content"]} for row in cur.fetchall()]
+        return [
+            {"role": row["role"], "content": row["content"], "created_at": row["created_at"]}
+            for row in cur.fetchall()
+        ]
+
+
+def get_transcript_since_last_lead(phone_number: str) -> list[dict]:
+    """Messages since this phone number's last submitted lead, oldest first,
+    each item as {"role", "content", "created_at"}.
+
+    Falls back to the full history if no prior lead exists (nothing to exclude).
+    Used for the lead email / order-summary extraction so a repeat customer's
+    old conversation doesn't bleed into a new lead - unlike get_recent_history
+    (the LLM's per-turn context), which intentionally ignores lead boundaries.
+
+    The boundary is the newest order_summaries.created_at for this number. Both
+    that and messages.created_at are ISO-8601 UTC strings from the same
+    datetime.now(timezone.utc).isoformat() pattern, so a plain string ">"
+    comparison orders correctly - no schema change or migration needed, and the
+    existing idx_order_summaries_phone / idx_messages_phone indexes cover both
+    queries. (created_at is also returned so the transcript PDF can show
+    per-message timestamps.)
+    """
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT created_at FROM order_summaries WHERE phone_number = ? ORDER BY id DESC LIMIT 1",
+            (phone_number,),
+        )
+        last_lead = cur.fetchone()
+
+        if last_lead is None:
+            cur.execute(
+                "SELECT role, content, created_at FROM messages WHERE phone_number = ? ORDER BY id ASC",
+                (phone_number,),
+            )
+        else:
+            cur.execute(
+                "SELECT role, content, created_at FROM messages "
+                "WHERE phone_number = ? AND created_at > ? ORDER BY id ASC",
+                (phone_number, last_lead["created_at"]),
+            )
+        return [
+            {"role": row["role"], "content": row["content"], "created_at": row["created_at"]}
+            for row in cur.fetchall()
+        ]

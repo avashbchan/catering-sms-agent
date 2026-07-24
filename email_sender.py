@@ -9,8 +9,11 @@ configured (see config.validate_for_startup):
 Either path builds the same HTML email so the "which one is configured"
 choice is invisible to the rest of the app.
 """
+import base64
 import logging
+import re
 import smtplib
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
@@ -19,6 +22,7 @@ from typing import Optional
 from config import config
 from knowledge_base import RESTAURANT_NAME, estimate_order_value
 from order_extraction import OrderSummary
+from transcript_pdf import build_transcript_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -137,13 +141,17 @@ def _build_html_email(lead: dict, transcript: list[dict], order_summary: Optiona
 
     open_questions_html = _open_questions_callout(order_summary)
 
-    transcript_html = "".join(
-        f'<p style="margin:4px 0;font-size:13px;">'
-        f'<strong>{"Customer" if m["role"] == "user" else "Assistant"}:</strong> '
-        f'{escape(m["content"])}</p>'
-        for m in transcript
+    # The full transcript (scoped to this lead - see storage.
+    # get_transcript_since_last_lead) rides along as a PDF attachment, so the
+    # body just points at it instead of dumping the whole back-and-forth inline.
+    message_count = len(transcript)
+    transcript_note = (
+        f"Full conversation transcript ({message_count} message"
+        f"{'' if message_count == 1 else 's'}) is attached as a PDF."
     )
 
+    # Body order: the transcript pointer sits up top; the lead summary (details,
+    # follow-up callout, itemized order) sits at the BOTTOM of the body.
     return f"""\
 <html>
 <body style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f4f4f5;padding:24px;">
@@ -154,6 +162,14 @@ def _build_html_email(lead: dict, transcript: list[dict], order_summary: Optiona
     </div>
 
     <div style="padding:20px 24px;">
+      <h3 style="font-size:14px;margin:0 0 8px;">Conversation transcript</h3>
+      <p style="margin:0;font-size:13px;color:#374151;background:#f9fafb;border-radius:6px;padding:12px 16px;">
+        📎 {escape(transcript_note)}
+      </p>
+
+      <h3 style="font-size:14px;margin:24px 0 8px;border-top:1px solid #e5e5e5;padding-top:16px;">
+        Lead summary
+      </h3>
       <table style="width:100%;border-collapse:collapse;">
         {summary_rows}
       </table>
@@ -162,13 +178,6 @@ def _build_html_email(lead: dict, transcript: list[dict], order_summary: Optiona
 
       <h3 style="font-size:14px;margin:20px 0 8px;">Itemized order</h3>
       {items_section}
-
-      <h3 style="font-size:14px;margin:24px 0 8px;border-top:1px solid #e5e5e5;padding-top:16px;">
-        Full conversation transcript
-      </h3>
-      <div style="background:#f9fafb;border-radius:6px;padding:12px 16px;">
-        {transcript_html}
-      </div>
     </div>
   </div>
 </body>
@@ -176,12 +185,20 @@ def _build_html_email(lead: dict, transcript: list[dict], order_summary: Optiona
 """
 
 
-def _send_via_smtp(subject: str, html_body: str) -> None:
-    msg = MIMEMultipart("alternative")
+def _send_via_smtp(subject: str, html_body: str, attachments: Optional[list[tuple[str, bytes]]] = None) -> None:
+    # "mixed" (not "alternative") because we're combining an HTML body with a
+    # separate file attachment, which are different parts, not alternative
+    # renderings of the same content.
+    msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"] = config.SMTP_FROM
     msg["To"] = config.STAFF_EMAIL
     msg.attach(MIMEText(html_body, "html"))
+
+    for filename, data in attachments or []:
+        part = MIMEApplication(data, _subtype="pdf")
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
 
     with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT) as server:
         server.starttls()
@@ -190,10 +207,17 @@ def _send_via_smtp(subject: str, html_body: str) -> None:
         server.sendmail(config.SMTP_FROM, [config.STAFF_EMAIL], msg.as_string())
 
 
-def _send_via_sendgrid(subject: str, html_body: str) -> None:
+def _send_via_sendgrid(subject: str, html_body: str, attachments: Optional[list[tuple[str, bytes]]] = None) -> None:
     # Imported lazily so `sendgrid` is only required if it's actually used.
     from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import Mail
+    from sendgrid.helpers.mail import (
+        Attachment,
+        Disposition,
+        FileContent,
+        FileName,
+        FileType,
+        Mail,
+    )
 
     message = Mail(
         from_email=config.SMTP_FROM or config.STAFF_EMAIL,
@@ -201,6 +225,15 @@ def _send_via_sendgrid(subject: str, html_body: str) -> None:
         subject=subject,
         html_content=html_body,
     )
+    for filename, data in attachments or []:
+        # Assigning message.attachment repeatedly appends (SendGrid's setter
+        # accumulates), so this supports one or many attachments.
+        message.attachment = Attachment(
+            FileContent(base64.b64encode(data).decode()),
+            FileName(filename),
+            FileType("application/pdf"),
+            Disposition("attachment"),
+        )
     sg = SendGridAPIClient(config.SENDGRID_API_KEY)
     response = sg.send(message)
     if response.status_code >= 300:
@@ -221,14 +254,32 @@ def send_lead_email(lead: dict, transcript: list[dict], order_summary: Optional[
     event_datetime = (order_summary.event_datetime if order_summary else None) or lead.get("event_datetime", "date TBD")
     subject = f"Catering Lead: {customer_name} — {event_datetime}"
 
+    attachments = _build_transcript_attachment(transcript, customer_name, lead.get("phone"))
+
     try:
         html_body = _build_html_email(lead, transcript, order_summary)
         if config.SENDGRID_API_KEY:
-            _send_via_sendgrid(subject, html_body)
+            _send_via_sendgrid(subject, html_body, attachments)
         else:
-            _send_via_smtp(subject, html_body)
+            _send_via_smtp(subject, html_body, attachments)
         logger.info("Lead email sent for customer=%s", customer_name)
         return True
     except Exception:
         logger.exception("Failed to send lead email for customer=%s", customer_name)
         return False
+
+
+def _build_transcript_attachment(
+    transcript: list[dict], customer_name: str, phone: Optional[str]
+) -> list[tuple[str, bytes]]:
+    """Render the transcript to a PDF attachment. On any failure, log and return
+    no attachment rather than blocking the lead email - the summary is still in
+    the body, so a broken PDF must never cost staff the notification itself."""
+    try:
+        pdf_bytes = build_transcript_pdf(transcript, customer_name=customer_name, phone=phone)
+    except Exception:
+        logger.exception("Transcript PDF generation failed; sending lead email without it")
+        return []
+
+    slug = re.sub(r"[^a-z0-9]+", "-", str(customer_name or "customer").lower()).strip("-") or "customer"
+    return [(f"transcript-{slug}.pdf", pdf_bytes)]
