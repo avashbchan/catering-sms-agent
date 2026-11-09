@@ -16,6 +16,7 @@ import smtplib
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from datetime import datetime
 from html import escape
 from typing import Optional
 
@@ -27,6 +28,29 @@ from transcript_pdf import build_transcript_pdf
 logger = logging.getLogger(__name__)
 
 
+def format_event_datetime(value: Optional[str]) -> Optional[str]:
+    """ISO-8601 from the extractor ('2026-12-12T13:00:00') -> 'Sat, Dec 12, 2026 at 1:00 PM'.
+
+    A date-only value ('2026-12-12') renders without a time. Anything that isn't
+    ISO (the extractor keeps the customer's own wording when it can't resolve a
+    date, e.g. "sometime in spring") is returned unchanged so it's never lost.
+    The 12-hour clock is built by hand because strftime's no-leading-zero hour
+    directive isn't portable (%-I on Linux vs %#I on Windows).
+    """
+    if not value:
+        return value
+    text = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    date_part = dt.strftime("%a, %b ") + str(dt.day) + dt.strftime(", %Y")
+    if "T" not in text and " " not in text:
+        return date_part
+    hour_12 = dt.hour % 12 or 12
+    return f"{date_part} at {hour_12}:{dt.strftime('%M %p')}"
+
+
 def _build_summary_row(label: str, value: str) -> str:
     return (
         f'<tr>'
@@ -34,6 +58,16 @@ def _build_summary_row(label: str, value: str) -> str:
         f'vertical-align:top;">{escape(label)}</td>'
         f'<td style="padding:6px 12px;color:#111;font-size:14px;">{value}</td>'
         f'</tr>'
+    )
+
+
+def _selections_line(selections: Optional[str]) -> str:
+    """Package choices (entree, included sides/dessert) shown under the item name."""
+    if not selections:
+        return ""
+    return (
+        '<div style="font-size:12px;color:#6b7280;margin-top:2px;">'
+        f"Includes: {escape(selections)}</div>"
     )
 
 
@@ -51,7 +85,8 @@ def _items_table_from_summary(order_summary: OrderSummary) -> str:
     )
     rows = "".join(
         '<tr style="border-bottom:1px solid #f0f0f0;">'
-        f'<td style="padding:4px 8px;font-size:13px;">{escape(item.name)}</td>'
+        f'<td style="padding:4px 8px;font-size:13px;">{escape(item.name)}'
+        f'{_selections_line(item.selections)}</td>'
         f'<td style="padding:4px 8px;font-size:13px;">{item.quantity}</td>'
         f'<td style="padding:4px 8px;font-size:13px;">'
         f'{f"${item.unit_price:,.2f}" if item.unit_price is not None else "-"}</td>'
@@ -94,7 +129,7 @@ def _build_html_email(lead: dict, transcript: list[dict], order_summary: Optiona
     `transcript` is the full conversation history: list of {"role", "content"}.
     """
     if order_summary is not None:
-        event_datetime = order_summary.event_datetime or "Not provided"
+        event_datetime = format_event_datetime(order_summary.event_datetime) or "Not provided"
         guest_count = order_summary.guest_count
         delivery_address = order_summary.delivery_address or order_summary.delivery_or_pickup or "Not provided"
         dietary_notes = order_summary.dietary_notes or "None noted"
@@ -120,7 +155,7 @@ def _build_html_email(lead: dict, transcript: list[dict], order_summary: Optiona
                 "</p>"
             )
         items_section = f'<ul style="margin:0;padding-left:20px;font-size:14px;">{items_list_html}</ul>{estimate_note}'
-        event_datetime = lead.get("event_datetime", "Not provided")
+        event_datetime = format_event_datetime(lead.get("event_datetime")) or "Not provided"
         delivery_address = lead.get("delivery_address", "Not provided")
         dietary_notes = lead.get("dietary_notes") or "None noted"
         budget = lead.get("budget") or "Not provided"
@@ -251,7 +286,9 @@ def send_lead_email(lead: dict, transcript: list[dict], order_summary: Optional[
     tool-call snapshot) is only used as a fallback when extraction failed.
     """
     customer_name = (order_summary.customer_name if order_summary else None) or lead.get("customer_name", "Unknown customer")
-    event_datetime = (order_summary.event_datetime if order_summary else None) or lead.get("event_datetime", "date TBD")
+    event_datetime = format_event_datetime(
+        (order_summary.event_datetime if order_summary else None) or lead.get("event_datetime")
+    ) or "date TBD"
     subject = f"Catering Lead: {customer_name} — {event_datetime}"
 
     attachments = _build_transcript_attachment(transcript, customer_name, lead.get("phone"))

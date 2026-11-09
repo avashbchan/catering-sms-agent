@@ -19,7 +19,7 @@ from datetime import date
 from typing import Optional
 
 from openai import BadRequestError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from config import config
 from llm import get_client
@@ -32,6 +32,17 @@ class OrderItem(BaseModel):
     quantity: int
     unit_price: Optional[float] = None  # null if price couldn't be determined from the KB
     line_total: Optional[float] = None
+    # Choices that come WITH this item at no separate line price (a package's
+    # entree option, included sides, included dessert). Without this, a priced
+    # package collapses to one line and staff lose what the customer picked.
+    selections: Optional[str] = Field(
+        default=None,
+        description=(
+            "Customer choices included with this item that are not priced as their own "
+            "line, e.g. 'Brisket; sides: mac and cheese, Carolina slaw; dessert: banana pudding'. "
+            "Null if the item has no choices."
+        ),
+    )
 
 
 class OrderSummary(BaseModel):
@@ -54,6 +65,20 @@ each item. If the customer corrected an earlier detail (e.g. a wrong date \
 or a changed item), use the corrected/final value, not the earlier mistaken \
 one. If a field was never provided, leave it null rather than guessing. \
 List anything ambiguous or unresolved in open_questions so staff can follow up.
+
+Every menu choice the customer made must appear in the summary - never drop a \
+choice because it has no separate price. For a package or bundle, list the \
+package as one item and put its included choices (entree option, included \
+sides, included dessert, bread, etc.) in that item's `selections`, rather \
+than as separate items. Add a separate item only for something priced on its \
+own or for an add-on surcharge (e.g. a side that costs extra) - if an included \
+choice carries a surcharge, name it in `selections` AND add the surcharge as \
+its own item. If a required package choice (e.g. which entree or which sides) \
+was never made, add it to open_questions.
+
+Write event_datetime in ISO 8601 local time: "YYYY-MM-DDTHH:MM:SS" when a \
+time was given (e.g. 1pm on Dec 12, 2026 -> "2026-12-12T13:00:00"), or \
+"YYYY-MM-DD" when only a date was given. No timezone offset.
 
 Today's actual date is {today} ({today_weekday}). When the customer gives a \
 relative date ("next Saturday", "this Friday", "in two weeks"), resolve it \
